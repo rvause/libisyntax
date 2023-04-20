@@ -277,6 +277,18 @@ const isyntax_image_t* libisyntax_get_wsi_image(const isyntax_t* isyntax) {
     return isyntax->images + isyntax->wsi_image_index;
 }
 
+int32_t libisyntax_get_is_mpp_known(const isyntax_t* isyntax) {
+    return isyntax->is_mpp_known;
+}
+
+double libisyntax_get_mpp_x(const isyntax_t* isyntax) {
+    return isyntax->mpp_x;
+}
+
+double libisyntax_get_mpp_y(const isyntax_t* isyntax) {
+    return isyntax->mpp_y;
+}
+
 const isyntax_image_t* libisyntax_get_label_image(const isyntax_t* isyntax) {
 	return isyntax->images + isyntax->label_image_index;
 }
@@ -333,6 +345,14 @@ float libisyntax_level_get_mpp_y(const isyntax_level_t* level) {
 	return level->um_per_pixel_y;
 }
 
+double libisyntax_level_get_downsample_factor(const isyntax_level_t* level) {
+    return level->downsample_factor;
+}
+
+double libisyntax_level_get_origin_offset_in_pixels(const isyntax_level_t* level) {
+    return level->origin_offset_in_pixels;
+}
+
 isyntax_error_t libisyntax_cache_create(const char* debug_name_or_null, int32_t cache_size,
                                         isyntax_cache_t** out_isyntax_cache)
 {
@@ -376,6 +396,20 @@ isyntax_error_t libisyntax_cache_inject(isyntax_cache_t* isyntax_cache, isyntax_
     isyntax->h_coeff_block_allocator = isyntax_cache->h_coeff_block_allocator;
     isyntax->is_block_allocator_owned = false;
     return LIBISYNTAX_OK;
+}
+
+
+void libisyntax_cache_flush(isyntax_cache_t* isyntax_cache, isyntax_t* isyntax_or_null) {
+    // Flusing per-isyntax is not yet implemented.
+    (void)isyntax_or_null;
+
+    benaphore_lock(&isyntax_cache->mutex);
+
+    while (isyntax_cache->cache_list.tail) {
+        tile_list_remove(&isyntax_cache->cache_list, isyntax_cache->cache_list.tail);
+    }
+
+    benaphore_unlock(&isyntax_cache->mutex);
 }
 
 void libisyntax_cache_destroy(isyntax_cache_t* isyntax_cache) {
