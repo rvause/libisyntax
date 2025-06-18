@@ -289,6 +289,74 @@ const char* libisyntax_get_barcode(const isyntax_t* isyntax) {
 	return isyntax->barcode;
 }
 
+const char* libisyntax_get_acquisition_datetime(const isyntax_t* isyntax) {
+	return isyntax->dicom_acquisition_datetime;
+}
+
+const char* libisyntax_get_manufacturer(const isyntax_t* isyntax) {
+	return isyntax->dicom_manufacturer;
+}
+
+const char* libisyntax_get_manufacturers_model_name(const isyntax_t* isyntax) {
+    return isyntax->dicom_manufacturers_model_name;
+}
+
+const char* libisyntax_scale_unit(const isyntax_t* isyntax) {
+    return isyntax->image_dimension_unit;
+}
+const char* libisyntax_get_derivation_description(const isyntax_t* isyntax) {
+    return isyntax->dicom_derivation_description;
+}
+
+const char* libisyntax_get_device_serial_number(const isyntax_t* isyntax) {
+    return isyntax->dicom_device_serial_number;
+}
+
+const int32_t libisyntax_get_software_versions_count(const isyntax_t* isyntax) {
+    return isyntax->dicom_software_versions_count;
+}
+
+const char* libisyntax_get_software_versions(const isyntax_t* isyntax, int32_t index) {
+    if (index < 0 || index >= isyntax->dicom_software_versions_count) {
+        return NULL;
+    }
+    return isyntax->dicom_software_versions[index];
+}
+
+const int32_t libisyntax_get_date_of_last_calibration_count(const isyntax_t* isyntax) {
+    return isyntax->dicom_date_of_last_calibration_count;
+}
+
+const char* libisyntax_get_date_of_last_calibration(const isyntax_t* isyntax, int32_t index) {
+    if (index < 0 || index >= isyntax->dicom_date_of_last_calibration_count) {
+        return NULL;
+    }
+    return isyntax->dicom_date_of_last_calibration[index];
+}
+
+const int32_t libisyntax_get_time_of_last_calibration_count(const isyntax_t* isyntax) {
+    return isyntax->dicom_time_of_last_calibration_count;
+}
+
+const char* libisyntax_get_time_of_last_calibration(const isyntax_t* isyntax, int32_t index) {
+    if (index < 0 || index >= isyntax->dicom_time_of_last_calibration_count) {
+        return NULL;
+    }
+    return isyntax->dicom_time_of_last_calibration[index];
+}
+
+bool libisyntax_is_lossy_image_compression(const isyntax_t* isyntax) {
+    return isyntax->dicom_lossy_image_compression;
+}
+
+double libisyntax_get_lossy_image_compression_ratio(const isyntax_t* isyntax) {
+    return isyntax->dicom_lossy_image_compression_ratio;
+}
+
+const char* libisyntax_get_lossy_image_compression_method(const isyntax_t* isyntax) {
+    return isyntax->dicom_lossy_image_compression_method;
+}
+
 int32_t libisyntax_image_get_level_count(const isyntax_image_t* image) {
     return image->level_count;
 }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <stdbool.h>
 
 // API conventions:
 // - return type is one of:
@@ -59,6 +60,22 @@ const isyntax_image_t* libisyntax_get_wsi_image(const isyntax_t* isyntax);
 const isyntax_image_t* libisyntax_get_label_image(const isyntax_t* isyntax);
 const isyntax_image_t* libisyntax_get_macro_image(const isyntax_t* isyntax);
 const char*            libisyntax_get_barcode(const isyntax_t* isyntax);
+const char*            libisyntax_get_acquisition_datetime(const isyntax_t* isyntax);
+const char*            libisyntax_get_manufacturer(const isyntax_t* isyntax);
+const char*            libisyntax_get_manufacturers_model_name(const isyntax_t* isyntax);
+const char*            libisyntax_get_derivation_description(const isyntax_t* isyntax);
+const char*            libisyntax_get_device_serial_number(const isyntax_t* isyntax);
+int32_t                libisyntax_get_software_versions_count(const isyntax_t* isyntax);
+const char*            libisyntax_get_software_versions(const isyntax_t* isyntax, int32_t index);
+int32_t                libisyntax_get_date_of_last_calibration_count(const isyntax_t* isyntax);
+const char*            libisyntax_get_date_of_last_calibration(const isyntax_t* isyntax, int32_t index);
+int32_t                libisyntax_get_time_of_last_calibration_count(const isyntax_t* isyntax);
+const char*            libisyntax_get_time_of_last_calibration(const isyntax_t* isyntax, int32_t index);
+const bool             libisyntax_is_lossy_image_compression(const isyntax_t* isyntax);
+const double           libisyntax_get_lossy_image_compression_ratio(const isyntax_t* isyntax);
+const char*            libisyntax_get_lossy_image_compression_method(const isyntax_t* isyntax);
+const char*            libisyntax_scale_unit(const isyntax_t* isyntax);
+
 int32_t                libisyntax_image_get_level_count(const isyntax_image_t* image);
 int32_t                libisyntax_image_get_offset_x(const isyntax_image_t* image);
 int32_t                libisyntax_image_get_offset_y(const isyntax_image_t* image);
