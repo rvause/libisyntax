@@ -16,14 +16,36 @@
 
 void print_isyntax_levels(isyntax_t* isyntax) {
     const isyntax_image_t* wsi_image = libisyntax_get_wsi_image(isyntax);
+    LOG_VAR("%s", libisyntax_get_acquisition_datetime(isyntax));
+    LOG_VAR("%s", libisyntax_get_manufacturer(isyntax));
+    LOG_VAR("%s", libisyntax_get_manufacturers_model_name(isyntax));
+    LOG_VAR("%s", libisyntax_get_derivation_description(isyntax));
+    LOG_VAR("%s", libisyntax_get_device_serial_number(isyntax));
+    for (int i = 0; i < libisyntax_get_software_versions_count(isyntax); ++i) {
+        LOG_VAR("%d", i);
+        LOG_VAR("%s", libisyntax_get_software_versions(isyntax, i));
+    }
+    for (int i = 0; i < libisyntax_get_date_of_last_calibration_count(isyntax); ++i) {
+        LOG_VAR("%d", i);
+        LOG_VAR("%s", libisyntax_get_date_of_last_calibration(isyntax, i));
+    }
+    for (int i = 0; i < libisyntax_get_time_of_last_calibration_count(isyntax); ++i) {
+        LOG_VAR("%d", i);
+        LOG_VAR("%s", libisyntax_get_time_of_last_calibration(isyntax, i));
+    }
 
+    LOG_VAR("%d", libisyntax_is_lossy_image_compression(isyntax));
+    LOG_VAR("%f", libisyntax_get_lossy_image_compression_ratio(isyntax));
+    LOG_VAR("%s", libisyntax_get_lossy_image_compression_method(isyntax));
     for (int i = 0; i < libisyntax_image_get_level_count(wsi_image); ++i) {
         const isyntax_level_t* level = libisyntax_image_get_level(wsi_image, i);
         LOG_VAR("%d", i);
         LOG_VAR("%d", libisyntax_level_get_scale(level));
         LOG_VAR("%d", libisyntax_level_get_width_in_tiles(level));
         LOG_VAR("%d", libisyntax_level_get_height_in_tiles(level));
+        LOG_VAR("%f", libisyntax_level_get_mpp_x(level));
     }
+    LOG_VAR("%s", libisyntax_scale_unit(isyntax));
 }
 
 int main(int argc, char** argv) {
