@@ -375,6 +375,145 @@ u8* isyntax_get_icc_profile(isyntax_t* isyntax, isyntax_image_t* image, u32* icc
 	return decoded;
 }
 
+// Read a big-endian u32 from a buffer (ICC profile fields are network byte order).
+static u32 icc_read_u32_be(const u8* p) {
+	return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | (u32)p[3];
+}
+
+// ICC XYZ tags store 3 signed s15Fixed16Number values preceded by a 4-byte type signature ('XYZ ').
+// Returns the three values as doubles; p points at the start of the tag data.
+static void icc_read_xyz_tag(const u8* p, double out[3]) {
+	// p[0..3] = 'XYZ ', p[4..7] = reserved (0), p[8..] = three s15Fixed16Number (each 4 bytes, signed)
+	for (int i = 0; i < 3; ++i) {
+		i32 raw = (i32)icc_read_u32_be(p + 8 + i * 4);
+		out[i] = (double) raw / 65536.0;
+	}
+}
+
+// Invert a row-major 3x3 matrix (m[9]) into inv[9]. Returns false if singular.
+static bool matrix3x3_inverse(const double m[9], double inv[9]) {
+	double a = m[0], b = m[1], c = m[2];
+	double d = m[3], e = m[4], f = m[5];
+	double g = m[6], h = m[7], i = m[8];
+	double ei_fh = e * i - f * h;
+	double fg_di = f * g - d * i;
+	double dh_eg = d * h - e * g;
+	double det = a * ei_fh + b * fg_di + c * dh_eg;
+	if (det == 0.0) return false;
+	double inv_det = 1.0 / det;
+	inv[0] =  ei_fh * inv_det;
+	inv[1] = (c * h - b * i) * inv_det;
+	inv[2] = (b * f - c * e) * inv_det;
+	inv[3] =  fg_di * inv_det;
+	inv[4] = (a * i - c * g) * inv_det;
+	inv[5] = (c * d - a * f) * inv_det;
+	inv[6] =  dh_eg * inv_det;
+	inv[7] = (b * g - a * h) * inv_det;
+	inv[8] = (a * e - b * d) * inv_det;
+	return true;
+}
+
+// out = a[9] @ b[9] (row-major 3x3 matrix multiply).
+static void matrix3x3_multiply(const double a[9], const double b[9], double out[9]) {
+	for (int r = 0; r < 3; ++r) {
+		for (int c = 0; c < 3; ++c) {
+			out[r * 3 + c] = a[r * 3 + 0] * b[0 * 3 + c]
+			               + a[r * 3 + 1] * b[1 * 3 + c]
+			               + a[r * 3 + 2] * b[2 * 3 + c];
+		}
+	}
+}
+
+void isyntax_precompute_color_matrix(isyntax_t* isyntax, isyntax_image_t* image) {
+	image->has_color_matrix = false;
+	for (int i = 0; i < 9; ++i) image->color_matrix[i] = 0.0;
+
+	u32 icc_size = 0;
+	u8* icc = isyntax_get_icc_profile(isyntax, image, &icc_size);
+	if (!icc || icc_size < 132) {
+		free(icc);
+		return;
+	}
+
+	// Validate ICC header: size field and 'acsp' magic.
+	if (icc_read_u32_be(icc + 0) != icc_size) { free(icc); return; }
+	if (memcmp(icc + 36, "acsp", 4) != 0) { free(icc); return; }
+
+	// Walk the tag table to locate the tags we need.
+	u32 tag_count = icc_read_u32_be(icc + 128);
+	const u8* rXYZ = NULL, * gXYZ = NULL, * bXYZ = NULL, * wtpt = NULL;
+	const u8* rTRC = NULL, * gTRC = NULL, * bTRC = NULL;
+	for (u32 t = 0; t < tag_count; ++t) {
+		const u8* entry = icc + 132 + (size_t) t * 12;
+		if ((size_t)(entry + 12 - icc) > icc_size) break;
+		char sig[5] = { (char)entry[0], (char)entry[1], (char)entry[2], (char)entry[3], 0 };
+		u32 off = icc_read_u32_be(entry + 4);
+		u32 len = icc_read_u32_be(entry + 8);
+		if ((size_t) off + len > icc_size) continue;
+		const u8* tag_data = icc + off;
+		if      (strcmp(sig, "rXYZ") == 0) rXYZ = tag_data;
+		else if (strcmp(sig, "gXYZ") == 0) gXYZ = tag_data;
+		else if (strcmp(sig, "bXYZ") == 0) bXYZ = tag_data;
+		else if (strcmp(sig, "wtpt") == 0) wtpt = tag_data;
+		else if (strcmp(sig, "rTRC") == 0) rTRC = tag_data;
+		else if (strcmp(sig, "gTRC") == 0) gTRC = tag_data;
+		else if (strcmp(sig, "bTRC") == 0) bTRC = tag_data;
+	}
+	if (!rXYZ || !gXYZ || !bXYZ || !wtpt || !rTRC || !gTRC || !bTRC) { free(icc); return; }
+
+	// Accept only identity / linear transfer curves (curv with count==0, or count==1 gamma==1.0).
+	// The manual matrix approach is exact only for gamma=1.0 profiles; a real LUT/curve needs LCMS2.
+	const u8* trcs[3] = { rTRC, gTRC, bTRC };
+	for (int t = 0; t < 3; ++t) {
+		if (memcmp(trcs[t], "curv", 4) != 0) { free(icc); return; }
+		u32 count = icc_read_u32_be(trcs[t] + 8);
+		if (count == 1) {
+			// u8Fixed8Number gamma at offset 12.
+			double gamma = ((double) trcs[t][12] + (double) trcs[t][13] / 256.0);
+			if (fabs(gamma - 1.0) > 1e-6) { free(icc); return; }
+		} else if (count != 0) {
+			free(icc); return;
+		}
+	}
+
+	// Build scanner matrix M_scanner (columns = R, G, B primaries as XYZ).
+	double col_r[3], col_g[3], col_b[3], white[3];
+	icc_read_xyz_tag(rXYZ, col_r);
+	icc_read_xyz_tag(gXYZ, col_g);
+	icc_read_xyz_tag(bXYZ, col_b);
+	icc_read_xyz_tag(wtpt, white);
+	double M_scanner[9] = {
+		col_r[0], col_g[0], col_b[0],
+		col_r[1], col_g[1], col_b[1],
+		col_r[2], col_g[2], col_b[2],
+	};
+
+	// The profile's primaries are over-scaled relative to its own media white point
+	// (observed on Philips WSI profiles: M*[1,1,1] overshoots wtpt by ~2.1x). Normalize
+	// so that scanner (1,1,1) maps to the declared white Y, which lands the matrix in the
+	// domain the downstream CLAHE/sharpening pipeline produces.
+	double sum_y = M_scanner[3] + M_scanner[4] + M_scanner[5];
+	double k = (sum_y > 0.0) ? white[1] / sum_y : 1.0;
+	for (int j = 0; j < 9; ++j) M_scanner[j] *= k;
+
+	// sRGB primaries in the ICC PCS (D50-adapted), standard values (columns = R,G,B XYZ).
+	double M_srgb_d50[9] = {
+		0.4361, 0.3851, 0.1431,
+		0.2225, 0.7169, 0.0606,
+		0.0139, 0.0971, 0.7141,
+	};
+	double M_srgb_inv[9];
+	if (!matrix3x3_inverse(M_srgb_d50, M_srgb_inv)) { free(icc); return; }
+
+	// Combined transform: scanner-linear-RGB -> sRGB-linear (both already in D50 PCS).
+	double combined[9];
+	matrix3x3_multiply(M_srgb_inv, M_scanner, combined);
+
+	for (int j = 0; j < 9; ++j) image->color_matrix[j] = combined[j];
+	image->has_color_matrix = true;
+	free(icc);
+}
+
 static void isyntax_parse_ufsimport_child_node(isyntax_t* isyntax, u32 group, u32 element, char* value, u64 value_len) {
 
 	switch(group) {
@@ -622,10 +761,30 @@ static bool isyntax_parse_scannedimage_child_node(isyntax_t* isyntax, u32 group,
 				} break;
 				case 0x1013: /*DP_COLOR_MANAGEMENT*/                        {} break;
 				case 0x1014: /*DP_IMAGE_POST_PROCESSING*/                   {} break;
-				case 0x1015: /*DP_SHARPNESS_GAIN_RGB24*/                    {} break;
-				case 0x1016: /*DP_CLAHE_CLIP_LIMIT_Y16*/                    {} break;
-				case 0x1017: /*DP_CLAHE_NR_BINS_Y16*/                       {} break;
-				case 0x1018: /*DP_CLAHE_CONTEXT_DIMENSION_Y16*/             {} break;
+				case 0x1015: /*DP_SHARPNESS_GAIN_RGB24*/                    {
+					i32 idx = isyntax->parser.postprocess_level_index;
+					if (idx >= 0 && idx < image->level_count) {
+						image->levels[idx].sharpness_gain = (float) atof(value);
+					}
+				} break;
+				case 0x1016: /*DP_CLAHE_CLIP_LIMIT_Y16*/                    {
+					i32 idx = isyntax->parser.postprocess_level_index;
+					if (idx >= 0 && idx < image->level_count) {
+						image->levels[idx].clahe_clip_limit = (float) atof(value);
+					}
+				} break;
+				case 0x1017: /*DP_CLAHE_NR_BINS_Y16*/                       {
+					i32 idx = isyntax->parser.postprocess_level_index;
+					if (idx >= 0 && idx < image->level_count) {
+						image->levels[idx].clahe_nr_bins = atoi(value);
+					}
+				} break;
+				case 0x1018: /*DP_CLAHE_CONTEXT_DIMENSION_Y16*/             {
+					i32 idx = isyntax->parser.postprocess_level_index;
+					if (idx >= 0 && idx < image->level_count) {
+						image->levels[idx].clahe_context_dimension = atoi(value);
+					}
+				} break;
 				case 0x1019: /*DP_WAVELET_QUANTIZER_SETTINGS_PER_COLOR*/    {} break;
 				case 0x101A: /*DP_WAVELET_QUANTIZER_SETTINGS_PER_LEVEL*/    {} break;
 				case 0x101B: /*DP_WAVELET_QUANTIZER*/                       {} break;
@@ -1362,7 +1521,10 @@ static bool isyntax_parse_xml_header(isyntax_t* isyntax, char* xml_header, i64 c
 									++parser->dimension_index;
 								} break;
 								case DP_COLOR_MANAGEMENT:                     flags &= ~ISYNTAX_OBJECT_DPColorManagement; break;
-								case DP_IMAGE_POST_PROCESSING:                flags &= ~ISYNTAX_OBJECT_DPImagePostProcessing; break;
+								case DP_IMAGE_POST_PROCESSING: {
+								flags &= ~ISYNTAX_OBJECT_DPImagePostProcessing;
+								++parser->postprocess_level_index;
+							} break;
 								case DP_WAVELET_QUANTIZER_SETTINGS_PER_COLOR: flags &= ~ISYNTAX_OBJECT_DPWaveletQuantizerSeetingsPerColor; break;
 								case DP_WAVELET_QUANTIZER_SETTINGS_PER_LEVEL: flags &= ~ISYNTAX_OBJECT_DPWaveletQuantizerSeetingsPerLevel; break;
 								case UFS_IMAGE_BLOCK_HEADERS: {
@@ -1516,6 +1678,7 @@ static bool isyntax_parse_xml_header(isyntax_t* isyntax, char* xml_header, i64 c
 								// We started parsing a new image (which will be either a WSI, LABELIMAGE or MACROIMAGE).
 								parser->current_image = isyntax->images + isyntax->image_count;
 								parser->running_image_index = isyntax->image_count++;
+								parser->postprocess_level_index = 0;
 							}
 						} else {
 							console_print_verbose("%sattr %s = %s\n", get_spaces(parser->node_stack_index), x->attr, parser->attrbuf);
@@ -3615,6 +3778,14 @@ bool isyntax_open(isyntax_t* isyntax, const char* filename, enum libisyntax_open
 			if (!isyntax->file_handle) {
 				console_print_error("Error: Could not reopen file for asynchronous I/O\n");
 				success = false;
+			}
+		}
+
+		// Precompute the per-image color matrices (no-op when no/unsupported ICC profile).
+		// Stored now so the optional post-processing path can apply it without re-reading the file.
+		if (success) {
+			for (i32 image_index = 0; image_index < isyntax->image_count; ++image_index) {
+				isyntax_precompute_color_matrix(isyntax, isyntax->images + image_index);
 			}
 		}
 	}
