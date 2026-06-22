@@ -131,3 +131,18 @@ isyntax_error_t libisyntax_read_macro_image(isyntax_t* isyntax, int32_t* width, 
 isyntax_error_t libisyntax_read_label_image_jpeg(isyntax_t* isyntax, uint8_t** jpeg_buffer, uint32_t* jpeg_size);
 isyntax_error_t libisyntax_read_macro_image_jpeg(isyntax_t* isyntax, uint8_t** jpeg_buffer, uint32_t* jpeg_size);
 isyntax_error_t libisyntax_read_icc_profile(isyntax_t* isyntax, isyntax_image_t* image, uint8_t** icc_profile_buffer, uint32_t* icc_profile_size);
+
+//== Post-processing API ==
+// Applies viewer-equivalent image enhancement using parameters embedded in the iSyntax file
+// (DPImagePostProcessing). This is an opt-in feature: by default the library returns raw decoder
+// output. Color management (scanner -> sRGB via the embedded ICC profile) is NOT applied by the
+// library; callers must use libisyntax_read_icc_profile() with an external CMS (e.g. lcms2).
+// Set flags before calling libisyntax_tile_read(); they can be OR'd together.
+// LIBISYNTAX_POSTPROCESS_ALL enables the complete in-library pipeline.
+enum libisyntax_postprocess_flags_t {
+    LIBISYNTAX_POSTPROCESS_NONE   = 0,
+    LIBISYNTAX_POSTPROCESS_CLAHE  = 1,  // local contrast enhancement (from DPImagePostProcessing)
+    LIBISYNTAX_POSTPROCESS_SHARPEN = 2, // unsharp mask, per-level gain (from DPImagePostProcessing)
+    LIBISYNTAX_POSTPROCESS_ALL    = 3,
+};
+isyntax_error_t libisyntax_image_set_postprocessing(isyntax_t* isyntax, isyntax_image_t* image, int32_t flags);

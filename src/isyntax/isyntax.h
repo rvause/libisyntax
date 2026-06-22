@@ -329,10 +329,8 @@ typedef struct isyntax_image_t {
 	bool first_load_in_progress;
 	i64 base64_encoded_icc_profile_file_offset;
 	size_t base64_encoded_icc_profile_len;
-	// Precomputed color transform matrix (scanner-linear RGB -> sRGB-linear), row-major [3][3].
-	// All zeros when has_color_matrix is false (no profile, or non-matrix profile not supported).
-	double color_matrix[9];
-	bool has_color_matrix;
+	// Post-processing flags (bitfield of libisyntax_postprocess_flags_t). 0 = raw decoder output.
+	int32_t postprocess_flags;
 } isyntax_image_t;
 
 typedef struct isyntax_parser_node_t {
@@ -450,10 +448,7 @@ i32 isyntax_get_chunk_codeblocks_per_color_for_level(i32 level, bool has_ll);
 u8* isyntax_get_associated_image_pixels(isyntax_t* isyntax, isyntax_image_t* image, enum isyntax_pixel_format_t pixel_format);
 u8* isyntax_get_associated_image_jpeg(isyntax_t* isyntax, isyntax_image_t* image, u32* jpeg_size);
 u8* isyntax_get_icc_profile(isyntax_t* isyntax, isyntax_image_t* image, u32* icc_profile_size);
-// Decodes the image's embedded ICC profile and, if it is a matrix-type profile with linear (gamma=1.0)
-// transfer curves, precomputes the combined 3x3 scanner-linear-RGB -> sRGB-linear transform into
-// image->color_matrix and sets image->has_color_matrix = true. No effect for unsupported profiles.
-void isyntax_precompute_color_matrix(isyntax_t* isyntax, isyntax_image_t* image);
+
 
 
 #ifdef __cplusplus

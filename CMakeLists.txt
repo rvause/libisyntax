@@ -65,6 +65,7 @@ set(LIBISYNTAX_COMMON_SOURCE_FILES
         src/isyntax/isyntax_reader.c
         src/utils/timerutils.c
         src/utils/block_allocator.c
+        src/utils/clahe.c
         src/platform/platform_mutex.c
         src/platform/platform.c
         src/platform/work_queue.c

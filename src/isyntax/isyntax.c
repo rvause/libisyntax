@@ -55,6 +55,7 @@
 
 // XML library for parsing the header
 #include "yxml.h"
+#include "clahe.h"
 
 // JPEG decoding library for macro/label images
 #ifdef ISYNTAX_JPEG_DECODER_USE_LIBJPEG
@@ -373,145 +374,6 @@ u8* isyntax_get_icc_profile(isyntax_t* isyntax, isyntax_image_t* image, u32* icc
 		free(encoded);
 	}
 	return decoded;
-}
-
-// Read a big-endian u32 from a buffer (ICC profile fields are network byte order).
-static u32 icc_read_u32_be(const u8* p) {
-	return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | (u32)p[3];
-}
-
-// ICC XYZ tags store 3 signed s15Fixed16Number values preceded by a 4-byte type signature ('XYZ ').
-// Returns the three values as doubles; p points at the start of the tag data.
-static void icc_read_xyz_tag(const u8* p, double out[3]) {
-	// p[0..3] = 'XYZ ', p[4..7] = reserved (0), p[8..] = three s15Fixed16Number (each 4 bytes, signed)
-	for (int i = 0; i < 3; ++i) {
-		i32 raw = (i32)icc_read_u32_be(p + 8 + i * 4);
-		out[i] = (double) raw / 65536.0;
-	}
-}
-
-// Invert a row-major 3x3 matrix (m[9]) into inv[9]. Returns false if singular.
-static bool matrix3x3_inverse(const double m[9], double inv[9]) {
-	double a = m[0], b = m[1], c = m[2];
-	double d = m[3], e = m[4], f = m[5];
-	double g = m[6], h = m[7], i = m[8];
-	double ei_fh = e * i - f * h;
-	double fg_di = f * g - d * i;
-	double dh_eg = d * h - e * g;
-	double det = a * ei_fh + b * fg_di + c * dh_eg;
-	if (det == 0.0) return false;
-	double inv_det = 1.0 / det;
-	inv[0] =  ei_fh * inv_det;
-	inv[1] = (c * h - b * i) * inv_det;
-	inv[2] = (b * f - c * e) * inv_det;
-	inv[3] =  fg_di * inv_det;
-	inv[4] = (a * i - c * g) * inv_det;
-	inv[5] = (c * d - a * f) * inv_det;
-	inv[6] =  dh_eg * inv_det;
-	inv[7] = (b * g - a * h) * inv_det;
-	inv[8] = (a * e - b * d) * inv_det;
-	return true;
-}
-
-// out = a[9] @ b[9] (row-major 3x3 matrix multiply).
-static void matrix3x3_multiply(const double a[9], const double b[9], double out[9]) {
-	for (int r = 0; r < 3; ++r) {
-		for (int c = 0; c < 3; ++c) {
-			out[r * 3 + c] = a[r * 3 + 0] * b[0 * 3 + c]
-			               + a[r * 3 + 1] * b[1 * 3 + c]
-			               + a[r * 3 + 2] * b[2 * 3 + c];
-		}
-	}
-}
-
-void isyntax_precompute_color_matrix(isyntax_t* isyntax, isyntax_image_t* image) {
-	image->has_color_matrix = false;
-	for (int i = 0; i < 9; ++i) image->color_matrix[i] = 0.0;
-
-	u32 icc_size = 0;
-	u8* icc = isyntax_get_icc_profile(isyntax, image, &icc_size);
-	if (!icc || icc_size < 132) {
-		free(icc);
-		return;
-	}
-
-	// Validate ICC header: size field and 'acsp' magic.
-	if (icc_read_u32_be(icc + 0) != icc_size) { free(icc); return; }
-	if (memcmp(icc + 36, "acsp", 4) != 0) { free(icc); return; }
-
-	// Walk the tag table to locate the tags we need.
-	u32 tag_count = icc_read_u32_be(icc + 128);
-	const u8* rXYZ = NULL, * gXYZ = NULL, * bXYZ = NULL, * wtpt = NULL;
-	const u8* rTRC = NULL, * gTRC = NULL, * bTRC = NULL;
-	for (u32 t = 0; t < tag_count; ++t) {
-		const u8* entry = icc + 132 + (size_t) t * 12;
-		if ((size_t)(entry + 12 - icc) > icc_size) break;
-		char sig[5] = { (char)entry[0], (char)entry[1], (char)entry[2], (char)entry[3], 0 };
-		u32 off = icc_read_u32_be(entry + 4);
-		u32 len = icc_read_u32_be(entry + 8);
-		if ((size_t) off + len > icc_size) continue;
-		const u8* tag_data = icc + off;
-		if      (strcmp(sig, "rXYZ") == 0) rXYZ = tag_data;
-		else if (strcmp(sig, "gXYZ") == 0) gXYZ = tag_data;
-		else if (strcmp(sig, "bXYZ") == 0) bXYZ = tag_data;
-		else if (strcmp(sig, "wtpt") == 0) wtpt = tag_data;
-		else if (strcmp(sig, "rTRC") == 0) rTRC = tag_data;
-		else if (strcmp(sig, "gTRC") == 0) gTRC = tag_data;
-		else if (strcmp(sig, "bTRC") == 0) bTRC = tag_data;
-	}
-	if (!rXYZ || !gXYZ || !bXYZ || !wtpt || !rTRC || !gTRC || !bTRC) { free(icc); return; }
-
-	// Accept only identity / linear transfer curves (curv with count==0, or count==1 gamma==1.0).
-	// The manual matrix approach is exact only for gamma=1.0 profiles; a real LUT/curve needs LCMS2.
-	const u8* trcs[3] = { rTRC, gTRC, bTRC };
-	for (int t = 0; t < 3; ++t) {
-		if (memcmp(trcs[t], "curv", 4) != 0) { free(icc); return; }
-		u32 count = icc_read_u32_be(trcs[t] + 8);
-		if (count == 1) {
-			// u8Fixed8Number gamma at offset 12.
-			double gamma = ((double) trcs[t][12] + (double) trcs[t][13] / 256.0);
-			if (fabs(gamma - 1.0) > 1e-6) { free(icc); return; }
-		} else if (count != 0) {
-			free(icc); return;
-		}
-	}
-
-	// Build scanner matrix M_scanner (columns = R, G, B primaries as XYZ).
-	double col_r[3], col_g[3], col_b[3], white[3];
-	icc_read_xyz_tag(rXYZ, col_r);
-	icc_read_xyz_tag(gXYZ, col_g);
-	icc_read_xyz_tag(bXYZ, col_b);
-	icc_read_xyz_tag(wtpt, white);
-	double M_scanner[9] = {
-		col_r[0], col_g[0], col_b[0],
-		col_r[1], col_g[1], col_b[1],
-		col_r[2], col_g[2], col_b[2],
-	};
-
-	// The profile's primaries are over-scaled relative to its own media white point
-	// (observed on Philips WSI profiles: M*[1,1,1] overshoots wtpt by ~2.1x). Normalize
-	// so that scanner (1,1,1) maps to the declared white Y, which lands the matrix in the
-	// domain the downstream CLAHE/sharpening pipeline produces.
-	double sum_y = M_scanner[3] + M_scanner[4] + M_scanner[5];
-	double k = (sum_y > 0.0) ? white[1] / sum_y : 1.0;
-	for (int j = 0; j < 9; ++j) M_scanner[j] *= k;
-
-	// sRGB primaries in the ICC PCS (D50-adapted), standard values (columns = R,G,B XYZ).
-	double M_srgb_d50[9] = {
-		0.4361, 0.3851, 0.1431,
-		0.2225, 0.7169, 0.0606,
-		0.0139, 0.0971, 0.7141,
-	};
-	double M_srgb_inv[9];
-	if (!matrix3x3_inverse(M_srgb_d50, M_srgb_inv)) { free(icc); return; }
-
-	// Combined transform: scanner-linear-RGB -> sRGB-linear (both already in D50 PCS).
-	double combined[9];
-	matrix3x3_multiply(M_srgb_inv, M_scanner, combined);
-
-	for (int j = 0; j < 9; ++j) image->color_matrix[j] = combined[j];
-	image->has_color_matrix = true;
-	free(icc);
 }
 
 static void isyntax_parse_ufsimport_child_node(isyntax_t* isyntax, u32 group, u32 element, char* value, u64 value_len) {
@@ -1979,6 +1841,124 @@ static void convert_ycocg_to_rgba_block(icoeff_t* Y, icoeff_t* Co, icoeff_t* Cg,
     }
 }
 
+//== Post-processing pipeline helpers ==
+
+static void pp_gaussian_blur_5tap(const float* src, float* dst, float* tmp, int width, int height) {
+    static const float k[5] = {0.05448868f, 0.24420134f, 0.40261996f, 0.24420134f, 0.05448868f};
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            float sum = 0;
+            for (int t = -2; t <= 2; t++) {
+                int xx = x + t;
+                if (xx < 0) xx = 0;
+                if (xx >= width) xx = width - 1;
+                sum += src[y * width + xx] * k[t + 2];
+            }
+            tmp[y * width + x] = sum;
+        }
+    }
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            float sum = 0;
+            for (int t = -2; t <= 2; t++) {
+                int yy = y + t;
+                if (yy < 0) yy = 0;
+                if (yy >= height) yy = height - 1;
+                sum += tmp[yy * width + x] * k[t + 2];
+            }
+            dst[y * width + x] = sum;
+        }
+    }
+}
+
+// Managed conversion: applies viewer-equivalent post-processing using per-level and per-image
+// parameters captured at open time. Scalar-only (no SIMD) — tiles are 256x256 = ~66K pixels.
+static void convert_ycocg_to_managed_rgba_block(icoeff_t* Y, icoeff_t* Co, icoeff_t* Cg,
+                                                i32 width, i32 height, i32 stride,
+                                                const isyntax_level_t* level,
+                                                const isyntax_image_t* image,
+                                                enum isyntax_pixel_format_t pixel_format,
+                                                u32* out_rgba) {
+    int n = width * height;
+
+    // Use the thread-local temp arena, same as the surrounding tile-load path.
+    temp_memory_t temp_memory = begin_temp_memory_on_local_thread();
+    arena_align(temp_memory.arena, 32);
+
+    float* luma     = (float*)arena_push_size(temp_memory.arena, n * sizeof(float));
+    float* chroma_r = (float*)arena_push_size(temp_memory.arena, n * sizeof(float));
+    float* chroma_g = (float*)arena_push_size(temp_memory.arena, n * sizeof(float));
+    float* chroma_b = (float*)arena_push_size(temp_memory.arena, n * sizeof(float));
+
+    // Step 1: YCoCg -> RGB (clamp to 0-255 like default path), decompose into luma + chroma
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            int i = y * width + x;
+            icoeff_t Yv = Y[y * stride + x];
+            icoeff_t Cov = Co[y * stride + x];
+            icoeff_t Cgv = Cg[y * stride + x];
+            icoeff_t tmp = Yv - Cgv / 2;
+            icoeff_t G = tmp + Cgv;
+            icoeff_t B = tmp - Cov / 2;
+            icoeff_t R = B + Cov;
+            float r = (float)(R < 0 ? 0 : (R > 255 ? 255 : R)) / 255.0f;
+            float g = (float)(G < 0 ? 0 : (G > 255 ? 255 : G)) / 255.0f;
+            float b = (float)(B < 0 ? 0 : (B > 255 ? 255 : B)) / 255.0f;
+            float lum = 0.299f * r + 0.587f * g + 0.114f * b;
+            luma[i] = lum;
+            chroma_r[i] = r - lum;
+            chroma_g[i] = g - lum;
+            chroma_b[i] = b - lum;
+        }
+    }
+
+    // Step 2: CLAHE on luma (if enabled)
+    if ((image->postprocess_flags & LIBISYNTAX_POSTPROCESS_CLAHE)
+        && level->clahe_nr_bins > 0 && level->clahe_context_dimension > 0) {
+        int grid_x = width / level->clahe_context_dimension; if (grid_x < 2) grid_x = 2;
+        int grid_y = height / level->clahe_context_dimension; if (grid_y < 2) grid_y = 2;
+        size_t cdfs_size, hist_size;
+        clahe_scratch_sizes(grid_x, grid_y, level->clahe_nr_bins, &cdfs_size, &hist_size);
+        clahe_scratch_t clahe_scratch;
+        clahe_scratch.cdfs = (float*)arena_push_size(temp_memory.arena, cdfs_size);
+        clahe_scratch.hist  = (int*)arena_push_size(temp_memory.arena, hist_size);
+        clahe_apply(luma, width, height, level->clahe_clip_limit, level->clahe_nr_bins,
+                    level->clahe_context_dimension, clahe_scratch);
+    }
+
+    // Step 3: Unsharp mask on luma (if enabled)
+    if ((image->postprocess_flags & LIBISYNTAX_POSTPROCESS_SHARPEN) && level->sharpness_gain > 0.0f) {
+        float* blurred = (float*)arena_push_size(temp_memory.arena, n * sizeof(float));
+        float* tmp_buf = (float*)arena_push_size(temp_memory.arena, n * sizeof(float));
+        pp_gaussian_blur_5tap(luma, blurred, tmp_buf, width, height);
+        for (int i = 0; i < n; i++) {
+            luma[i] += level->sharpness_gain * (luma[i] - blurred[i]);
+        }
+    }
+
+    // Step 4: Reconstruct RGB, encode to display, pack
+    for (int i = 0; i < n; i++) {
+        float lum = luma[i];
+        float r = lum + chroma_r[i];
+        float g = lum + chroma_g[i];
+        float b = lum + chroma_b[i];
+        r = r < 0 ? 0 : (r > 1 ? 1 : r);
+        g = g < 0 ? 0 : (g > 1 ? 1 : g);
+        b = b < 0 ? 0 : (b > 1 ? 1 : b);
+
+        u8 r8 = (u8)(r * 255.0f + 0.5f);
+        u8 g8 = (u8)(g * 255.0f + 0.5f);
+        u8 b8 = (u8)(b * 255.0f + 0.5f);
+        if (pixel_format == LIBISYNTAX_PIXEL_FORMAT_BGRA) {
+            out_rgba[i] = ((u32)b8) | ((u32)g8 << 8) | ((u32)r8 << 16) | ((u32)255 << 24);
+        } else {
+            out_rgba[i] = ((u32)r8) | ((u32)g8 << 8) | ((u32)b8 << 16) | ((u32)255 << 24);
+        }
+    }
+
+    release_temp_memory(&temp_memory);
+}
+
 #define DEBUG_OUTPUT_IDWT_STEPS_AS_PNG 0
 
 void isyntax_idwt(icoeff_t* idwt, i32 quadrant_width, i32 quadrant_height, bool output_steps_as_png, const char* png_name) {
@@ -2567,20 +2547,25 @@ void isyntax_load_tile(isyntax_t* isyntax, isyntax_image_t* wsi, i32 scale, i32 
 	i32 tile_height = block_height * 2;
 
 	i32 valid_offset = (first_valid_pixel * idwt_stride) + first_valid_pixel;
-    switch (pixel_format) {
-        case LIBISYNTAX_PIXEL_FORMAT_BGRA:
-            convert_ycocg_to_bgra_block(Y + valid_offset, Co + valid_offset, Cg + valid_offset, tile_width, tile_height,
-                                        idwt_stride, out_buffer_or_null);
-            break;
+    if (wsi->postprocess_flags != 0) {
+        convert_ycocg_to_managed_rgba_block(Y + valid_offset, Co + valid_offset, Cg + valid_offset, tile_width, tile_height,
+                                            idwt_stride, &wsi->levels[scale], wsi, pixel_format, out_buffer_or_null);
+    } else {
+        switch (pixel_format) {
+            case LIBISYNTAX_PIXEL_FORMAT_BGRA:
+                convert_ycocg_to_bgra_block(Y + valid_offset, Co + valid_offset, Cg + valid_offset, tile_width, tile_height,
+                                            idwt_stride, out_buffer_or_null);
+                break;
 
-        case LIBISYNTAX_PIXEL_FORMAT_RGBA:
-            convert_ycocg_to_rgba_block(Y + valid_offset, Co + valid_offset, Cg + valid_offset, tile_width, tile_height,
-                                        idwt_stride, out_buffer_or_null);
-            break;
+            case LIBISYNTAX_PIXEL_FORMAT_RGBA:
+                convert_ycocg_to_rgba_block(Y + valid_offset, Co + valid_offset, Cg + valid_offset, tile_width, tile_height,
+                                            idwt_stride, out_buffer_or_null);
+                break;
 
-        default:
-            ASSERT(!"unknown pixel format!");
-            break;
+            default:
+                ASSERT(!"unknown pixel format!");
+                break;
+        }
     }
 	isyntax->total_rgb_transform_time += get_seconds_elapsed(start, get_clock());
 
@@ -3781,13 +3766,6 @@ bool isyntax_open(isyntax_t* isyntax, const char* filename, enum libisyntax_open
 			}
 		}
 
-		// Precompute the per-image color matrices (no-op when no/unsupported ICC profile).
-		// Stored now so the optional post-processing path can apply it without re-reading the file.
-		if (success) {
-			for (i32 image_index = 0; image_index < isyntax->image_count; ++image_index) {
-				isyntax_precompute_color_matrix(isyntax, isyntax->images + image_index);
-			}
-		}
 	}
 	return success;
 }

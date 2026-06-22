@@ -58,6 +58,7 @@ isyntax_source = [
   'src/third_party/ltalloc.cc',
   'src/third_party/yxml.c',
   'src/utils/block_allocator.c',
+  'src/utils/clahe.c',
   'src/utils/timerutils.c',
   'src/libisyntax.c',
 ]

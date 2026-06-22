@@ -522,3 +522,10 @@ isyntax_error_t libisyntax_read_icc_profile(isyntax_t* isyntax, isyntax_image_t*
         return LIBISYNTAX_FATAL;
     }
 }
+
+isyntax_error_t libisyntax_image_set_postprocessing(isyntax_t* isyntax, isyntax_image_t* image, int32_t flags) {
+    ASSERT(isyntax);
+    ASSERT(image);
+    image->postprocess_flags = flags;
+    return LIBISYNTAX_OK;
+}

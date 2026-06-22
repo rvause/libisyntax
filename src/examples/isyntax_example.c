@@ -53,9 +53,10 @@ int main(int argc, char** argv) {
     if (argc <= 1) {
         printf("Usage: %s <isyntax_file> - show levels & tiles.\n"
                "       %s <isyntax_file> <level> <tile_x> <tile_y> <output.png> - write a tile to output.png\n"
+               "       %s <isyntax_file> --postprocess <level> <tile_x> <tile_y> <output.png> - with viewer-equivalent post-processing\n"
                "       %s <isyntax_file> label <output.jpg> - write label image to output.jpg\n"
                "       %s <isyntax_file> macro <output.jpg> - write macro image to output.jpg\n",
-               argv[0], argv[0], argv[0], argv[0]);
+               argv[0], argv[0], argv[0], argv[0], argv[0]);
         return 0;
     }
 
@@ -70,11 +71,24 @@ int main(int argc, char** argv) {
     }
     printf("Successfully opened %s\n", filename);
 
-    if (argc >= 6) {
-        int level = atoi(argv[2]);
-        int tile_x = atoi(argv[3]);
-        int tile_y = atoi(argv[4]);
-        const char* output_png = argv[5];
+    // Check for --postprocess flag
+    bool enable_postprocess = false;
+    int arg_offset = 0;
+    if (argc >= 3 && strcmp(argv[2], "--postprocess") == 0) {
+        enable_postprocess = true;
+        arg_offset = 1;
+    }
+    if (enable_postprocess) {
+        const isyntax_image_t* wsi_image = libisyntax_get_wsi_image(isyntax);
+        CHECK_LIBISYNTAX_OK(libisyntax_image_set_postprocessing(isyntax, (isyntax_image_t*)wsi_image,
+                                                                 LIBISYNTAX_POSTPROCESS_ALL));
+    }
+
+    if (argc >= 6 + arg_offset) {
+        int level = atoi(argv[2 + arg_offset]);
+        int tile_x = atoi(argv[3 + arg_offset]);
+        int tile_y = atoi(argv[4 + arg_offset]);
+        const char* output_png = argv[5 + arg_offset];
 
         LOG_VAR("%d", level);
         LOG_VAR("%d", tile_x);
