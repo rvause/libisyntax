@@ -131,3 +131,27 @@ isyntax_error_t libisyntax_read_macro_image(isyntax_t* isyntax, int32_t* width, 
 isyntax_error_t libisyntax_read_label_image_jpeg(isyntax_t* isyntax, uint8_t** jpeg_buffer, uint32_t* jpeg_size);
 isyntax_error_t libisyntax_read_macro_image_jpeg(isyntax_t* isyntax, uint8_t** jpeg_buffer, uint32_t* jpeg_size);
 isyntax_error_t libisyntax_read_icc_profile(isyntax_t* isyntax, isyntax_image_t* image, uint8_t** icc_profile_buffer, uint32_t* icc_profile_size);
+
+
+//== Post-processing API ==
+// Flags controlling optional image enhancement. Off by default.
+// When enabled on a slide with absent or zero-value parameters the effects are no-ops.
+enum libisyntax_postprocessing_flags_t {
+    LIBISYNTAX_POSTPROCESSING_NONE      = 0,
+    LIBISYNTAX_POSTPROCESSING_SHARPNESS = 1,  // unsharp-mask on RGB24 output per tile
+    LIBISYNTAX_POSTPROCESSING_CLAHE     = 2,  // CLAHE on Y16 before color conversion
+    LIBISYNTAX_POSTPROCESSING_ALL       = 3,
+};
+
+// Record which effects are enabled. Fast — no allocation, no decode.
+// Call before starting tile reads. The image pointer must be non-const;
+// cast from libisyntax_get_wsi_image() if needed.
+void libisyntax_image_set_postprocessing(isyntax_image_t* image, int32_t flags);
+
+// Build the CLAHE LUT grid. Must be called after libisyntax_image_set_postprocessing
+// and before any libisyntax_tile_read calls, if LIBISYNTAX_POSTPROCESSING_CLAHE is set.
+// No-op if CLAHE is not enabled, or if the slide's CLAHE parameters are zero/absent.
+// Decodes the coarsest pyramid level to build a global, seam-free LUT grid.
+isyntax_error_t libisyntax_image_prepare_postprocessing(isyntax_t* isyntax,
+                                                         isyntax_cache_t* cache,
+                                                         isyntax_image_t* image);

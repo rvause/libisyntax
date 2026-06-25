@@ -622,10 +622,22 @@ static bool isyntax_parse_scannedimage_child_node(isyntax_t* isyntax, u32 group,
 				} break;
 				case 0x1013: /*DP_COLOR_MANAGEMENT*/                        {} break;
 				case 0x1014: /*DP_IMAGE_POST_PROCESSING*/                   {} break;
-				case 0x1015: /*DP_SHARPNESS_GAIN_RGB24*/                    {} break;
-				case 0x1016: /*DP_CLAHE_CLIP_LIMIT_Y16*/                    {} break;
-				case 0x1017: /*DP_CLAHE_NR_BINS_Y16*/                       {} break;
-				case 0x1018: /*DP_CLAHE_CONTEXT_DIMENSION_Y16*/             {} break;
+				case 0x1015: { /*DP_SHARPNESS_GAIN_RGB24*/
+					i32 idx = isyntax->parser.post_processing_level_index;
+					if (idx < 16) image->sharpness_gain[idx] = (float)atof(value);
+				} break;
+				case 0x1016: { /*DP_CLAHE_CLIP_LIMIT_Y16*/
+					if (isyntax->parser.post_processing_level_index == 0)
+						image->clahe_clip_limit = (float)atof(value);
+				} break;
+				case 0x1017: { /*DP_CLAHE_NR_BINS_Y16*/
+					if (isyntax->parser.post_processing_level_index == 0)
+						image->clahe_nr_bins = atoi(value);
+				} break;
+				case 0x1018: { /*DP_CLAHE_CONTEXT_DIMENSION_Y16*/
+					if (isyntax->parser.post_processing_level_index == 0)
+						image->clahe_context_dim = atoi(value);
+				} break;
 				case 0x1019: /*DP_WAVELET_QUANTIZER_SETTINGS_PER_COLOR*/    {} break;
 				case 0x101A: /*DP_WAVELET_QUANTIZER_SETTINGS_PER_LEVEL*/    {} break;
 				case 0x101B: /*DP_WAVELET_QUANTIZER*/                       {} break;
@@ -1362,7 +1374,12 @@ static bool isyntax_parse_xml_header(isyntax_t* isyntax, char* xml_header, i64 c
 									++parser->dimension_index;
 								} break;
 								case DP_COLOR_MANAGEMENT:                     flags &= ~ISYNTAX_OBJECT_DPColorManagement; break;
-								case DP_IMAGE_POST_PROCESSING:                flags &= ~ISYNTAX_OBJECT_DPImagePostProcessing; break;
+								case DP_IMAGE_POST_PROCESSING: {
+									flags &= ~ISYNTAX_OBJECT_DPImagePostProcessing;
+									++parser->post_processing_level_index;
+									if (parser->current_image)
+										++parser->current_image->post_processing_level_count;
+								} break;
 								case DP_WAVELET_QUANTIZER_SETTINGS_PER_COLOR: flags &= ~ISYNTAX_OBJECT_DPWaveletQuantizerSeetingsPerColor; break;
 								case DP_WAVELET_QUANTIZER_SETTINGS_PER_LEVEL: flags &= ~ISYNTAX_OBJECT_DPWaveletQuantizerSeetingsPerLevel; break;
 								case UFS_IMAGE_BLOCK_HEADERS: {
@@ -1715,7 +1732,7 @@ static void convert_ycocg_to_bgra_block(icoeff_t* Y, icoeff_t* Co, icoeff_t* Cg,
 			_mm_storeu_si128((__m128i*)(dest + i), lo);
 			_mm_storeu_si128((__m128i*)(dest + i + 4), hi);
 		}
-#elif defined(__ARM_NEON__)
+#elif defined(__ARM_NEON)
         // Fast SIMD version for ARM NEON
         for (; i < aligned_width; i += 8) {
             int16x8_t Y_ = vld1q_s16(Y + i);
@@ -1785,7 +1802,7 @@ static void convert_ycocg_to_rgba_block(icoeff_t* Y, icoeff_t* Co, icoeff_t* Cg,
 			_mm_storeu_si128((__m128i*)(dest + i), lo);
 			_mm_storeu_si128((__m128i*)(dest + i + 4), hi);
 		}
-#elif defined(__ARM_NEON__)
+#elif defined(__ARM_NEON)
         // Fast SIMD version for ARM NEON
         for (; i < aligned_width; i += 8) {
             int16x8_t Y_ = vld1q_s16(Y + i);
@@ -2404,6 +2421,74 @@ void isyntax_load_tile(isyntax_t* isyntax, isyntax_image_t* wsi, i32 scale, i32 
 	i32 tile_height = block_height * 2;
 
 	i32 valid_offset = (first_valid_pixel * idwt_stride) + first_valid_pixel;
+
+	// CLAHE on Y16 — applied before YCoCg→RGB so we operate in luminance domain.
+	// Coordinate computation is hoisted: ty is constant per row, tx is constant
+	// per run of (1<<shift) pixels, so the float division and LUT pointer setup
+	// happens once per run rather than once per pixel.
+	if (wsi->postprocessing_flags & LIBISYNTAX_POSTPROCESSING_CLAHE &&
+	    wsi->clahe_lut_grid != NULL && wsi->clahe_nr_bins > 0) {
+		i32 bins  = wsi->clahe_nr_bins;
+		i32 ctx   = wsi->clahe_context_dim;
+		i32 gw    = wsi->clahe_grid_width;
+		i32 gh    = wsi->clahe_grid_height;
+		i32 shift = wsi->max_scale - scale; // always >= 0 since scale <= max_scale
+		i32 tile_origin_x = tile_x * tile_width;
+		i32 tile_origin_y = tile_y * tile_height;
+
+		for (i32 ly = 0; ly < tile_height; ++ly) {
+			icoeff_t* yrow = Y + valid_offset + ly * idwt_stride;
+
+			// Y-axis grid info: constant for the entire row.
+			i32 ty_coord = (tile_origin_y + ly) >> shift;
+			float gyf = ((float)ty_coord - ctx * 0.5f) / (float)ctx;
+			i32 gy0 = (i32)gyf; if (gy0 < 0) gy0 = 0; if (gy0 >= gh) gy0 = gh - 1;
+			i32 gy1 = gy0 + 1;  if (gy1 >= gh) gy1 = gh - 1;
+			float wy = gyf - (float)gy0; if (wy < 0.0f) wy = 0.0f;
+			const u8* grid_y0 = wsi->clahe_lut_grid + (size_t)gy0 * gw * bins;
+			const u8* grid_y1 = wsi->clahe_lut_grid + (size_t)gy1 * gw * bins;
+
+			// Walk x in runs where the thumbnail x coordinate is constant.
+			// For shift=S, tx changes every 2^S pixels; run length = 2^S.
+			i32 lx = 0;
+			while (lx < tile_width) {
+				i32 tx = (tile_origin_x + lx) >> shift;
+
+				// End of this constant-tx run (next tx boundary in tile coords).
+				i32 run_end = shift > 0 ? (((tx + 1) << shift) - tile_origin_x) : (lx + 1);
+				if (run_end > tile_width) run_end = tile_width;
+
+				// X-axis grid info: constant for this run.
+				float gxf = ((float)tx - ctx * 0.5f) / (float)ctx;
+				i32 gx0 = (i32)gxf; if (gx0 < 0) gx0 = 0; if (gx0 >= gw) gx0 = gw - 1;
+				i32 gx1 = gx0 + 1;  if (gx1 >= gw) gx1 = gw - 1;
+				float wx = gxf - (float)gx0; if (wx < 0.0f) wx = 0.0f;
+
+				// 4 LUT base pointers: constant for this run.
+				const u8* lut00 = grid_y0 + (size_t)gx0 * bins;
+				const u8* lut10 = grid_y0 + (size_t)gx1 * bins;
+				const u8* lut01 = grid_y1 + (size_t)gx0 * bins;
+				const u8* lut11 = grid_y1 + (size_t)gx1 * bins;
+
+				// Bilinear weights as fixed-point [0..256]; computed once per run.
+				u32 w00 = (u32)(((1.0f - wx) * (1.0f - wy)) * 256.0f + 0.5f);
+				u32 w10 = (u32)((wx          * (1.0f - wy)) * 256.0f + 0.5f);
+				u32 w01 = (u32)(((1.0f - wx) * wy)          * 256.0f + 0.5f);
+				u32 w11 = (u32)((wx          * wy)           * 256.0f + 0.5f);
+
+				// Inner loop: table lookup + fixed-point bilerp only — no float ops.
+				for (i32 px = lx; px < run_end; ++px) {
+					u32 bin = (u32)(u16)yrow[px]; // Y in [0,255] = bin directly
+					if (bin >= (u32)bins) bin = (u32)bins - 1;
+					u32 v = w00 * lut00[bin] + w10 * lut10[bin]
+					      + w01 * lut01[bin] + w11 * lut11[bin];
+					yrow[px] = (icoeff_t)((v + 128) >> 8);
+				}
+				lx = run_end;
+			}
+		}
+	}
+
     switch (pixel_format) {
         case LIBISYNTAX_PIXEL_FORMAT_BGRA:
             convert_ycocg_to_bgra_block(Y + valid_offset, Co + valid_offset, Cg + valid_offset, tile_width, tile_height,
@@ -2421,14 +2506,134 @@ void isyntax_load_tile(isyntax_t* isyntax, isyntax_image_t* wsi, i32 scale, i32 
     }
 	isyntax->total_rgb_transform_time += get_seconds_elapsed(start, get_clock());
 
-	//		float elapsed_rgb = get_seconds_elapsed(start, get_clock());
-	//	console_print_verbose("load: scale=%d x=%d y=%d  idwt time =%g  rgb transform time=%g  malloc time=%g\n", scale, tile_x, tile_y, elapsed_idwt, elapsed_rgb, elapsed_malloc);
+	// Sharpness (unsharp mask) on RGB24 output.
+	// DP_SHARPNESS_GAIN_RGB24 is per scale level; sharpening = original + gain*(original - blur).
+	if (wsi->postprocessing_flags & LIBISYNTAX_POSTPROCESSING_SHARPNESS &&
+	    scale < 16 && wsi->sharpness_gain[scale] != 0.0f) {
+		size_t tile_pixels = (size_t)tile_width * tile_height;
+		u32* blur = (u32*)arena_push_size(temp_memory.arena, tile_pixels * sizeof(u32));
+
+		// Separable 5×5 Gaussian kernel [1 4 6 4 1]/16 applied to R, G, B channels.
+		// Pass 1: horizontal.
+		u32* horiz = (u32*)arena_push_size(temp_memory.arena, tile_pixels * sizeof(u32));
+		for (i32 py = 0; py < tile_height; ++py) {
+			for (i32 px = 0; px < tile_width; ++px) {
+				i32 x0 = px - 2; if (x0 < 0) x0 = 0;
+				i32 x1 = px - 1; if (x1 < 0) x1 = 0;
+				i32 x2 = px;
+				i32 x3 = px + 1; if (x3 >= tile_width) x3 = tile_width - 1;
+				i32 x4 = px + 2; if (x4 >= tile_width) x4 = tile_width - 1;
+				u32 p0 = out_buffer_or_null[py * tile_width + x0];
+				u32 p1 = out_buffer_or_null[py * tile_width + x1];
+				u32 p2 = out_buffer_or_null[py * tile_width + x2];
+				u32 p3 = out_buffer_or_null[py * tile_width + x3];
+				u32 p4 = out_buffer_or_null[py * tile_width + x4];
+				// Compute per-channel weighted sum / 16.
+				u32 r = ((p0>>0&0xFF) + 4*(p1>>0&0xFF) + 6*(p2>>0&0xFF) + 4*(p3>>0&0xFF) + (p4>>0&0xFF)) >> 4;
+				u32 g = ((p0>>8&0xFF) + 4*(p1>>8&0xFF) + 6*(p2>>8&0xFF) + 4*(p3>>8&0xFF) + (p4>>8&0xFF)) >> 4;
+				u32 b = ((p0>>16&0xFF) + 4*(p1>>16&0xFF) + 6*(p2>>16&0xFF) + 4*(p3>>16&0xFF) + (p4>>16&0xFF)) >> 4;
+				u32 a = p2 >> 24;
+				horiz[py * tile_width + px] = r | (g << 8) | (b << 16) | (a << 24);
+			}
+		}
+		// Pass 2: vertical.
+		for (i32 py = 0; py < tile_height; ++py) {
+			i32 y0 = py - 2; if (y0 < 0) y0 = 0;
+			i32 y1 = py - 1; if (y1 < 0) y1 = 0;
+			i32 y2 = py;
+			i32 y3 = py + 1; if (y3 >= tile_height) y3 = tile_height - 1;
+			i32 y4 = py + 2; if (y4 >= tile_height) y4 = tile_height - 1;
+			for (i32 px = 0; px < tile_width; ++px) {
+				u32 p0 = horiz[y0 * tile_width + px];
+				u32 p1 = horiz[y1 * tile_width + px];
+				u32 p2 = horiz[y2 * tile_width + px];
+				u32 p3 = horiz[y3 * tile_width + px];
+				u32 p4 = horiz[y4 * tile_width + px];
+				u32 r = ((p0>>0&0xFF) + 4*(p1>>0&0xFF) + 6*(p2>>0&0xFF) + 4*(p3>>0&0xFF) + (p4>>0&0xFF)) >> 4;
+				u32 g = ((p0>>8&0xFF) + 4*(p1>>8&0xFF) + 6*(p2>>8&0xFF) + 4*(p3>>8&0xFF) + (p4>>8&0xFF)) >> 4;
+				u32 b = ((p0>>16&0xFF) + 4*(p1>>16&0xFF) + 6*(p2>>16&0xFF) + 4*(p3>>16&0xFF) + (p4>>16&0xFF)) >> 4;
+				u32 a = p2 >> 24;
+				blur[py * tile_width + px] = r | (g << 8) | (b << 16) | (a << 24);
+			}
+		}
+
+		// Apply unsharp mask: out = original + gain * (original - blur).
+		// SIMD paths (SSE2 and NEON) process 4 RGBA pixels (16 bytes) per iteration.
+		// The mulhi+mullo decomposition in SSE2 correctly handles gain_fp up to 32767
+		// without overflow, covering the full sharpness range declared by the format.
+		i32 gain_fp = (i32)(wsi->sharpness_gain[scale] * 256.0f + 0.5f);
+		i32 n_pixels = tile_width * tile_height;
+		i32 n_simd = (n_pixels / 4) * 4;
+#if defined(__SSE2__)
+		{
+			__m128i zero   = _mm_setzero_si128();
+			__m128i gain_v = _mm_set1_epi16((short)gain_fp);
+			for (i32 i = 0; i < n_simd; i += 4) {
+				__m128i orig = _mm_loadu_si128((__m128i*)(out_buffer_or_null + i));
+				__m128i bl   = _mm_loadu_si128((__m128i*)(blur + i));
+				__m128i o_lo = _mm_unpacklo_epi8(orig, zero);
+				__m128i b_lo = _mm_unpacklo_epi8(bl, zero);
+				__m128i o_hi = _mm_unpackhi_epi8(orig, zero);
+				__m128i b_hi = _mm_unpackhi_epi8(bl, zero);
+				__m128i d_lo = _mm_sub_epi16(o_lo, b_lo);
+				__m128i d_hi = _mm_sub_epi16(o_hi, b_hi);
+				// scaled = diff * gain_fp >> 8 via mulhi+mullo, no overflow for gain_fp <= 32767
+				__m128i s_lo = _mm_or_si128(_mm_slli_epi16(_mm_mulhi_epi16(d_lo, gain_v), 8),
+				                            _mm_srli_epi16(_mm_mullo_epi16(d_lo, gain_v), 8));
+				__m128i s_hi = _mm_or_si128(_mm_slli_epi16(_mm_mulhi_epi16(d_hi, gain_v), 8),
+				                            _mm_srli_epi16(_mm_mullo_epi16(d_hi, gain_v), 8));
+				__m128i r_lo = _mm_add_epi16(o_lo, s_lo);
+				__m128i r_hi = _mm_add_epi16(o_hi, s_hi);
+				_mm_storeu_si128((__m128i*)(out_buffer_or_null + i), _mm_packus_epi16(r_lo, r_hi));
+			}
+		}
+#elif defined(__ARM_NEON)
+		{
+			int16_t gain16 = (int16_t)gain_fp;
+			for (i32 i = 0; i < n_simd; i += 4) {
+				uint8x16_t orig16 = vld1q_u8((uint8_t*)(out_buffer_or_null + i));
+				uint8x16_t blur16 = vld1q_u8((uint8_t*)(blur + i));
+				int16x8_t o_lo = vreinterpretq_s16_u16(vmovl_u8(vget_low_u8(orig16)));
+				int16x8_t b_lo = vreinterpretq_s16_u16(vmovl_u8(vget_low_u8(blur16)));
+				int16x8_t o_hi = vreinterpretq_s16_u16(vmovl_u8(vget_high_u8(orig16)));
+				int16x8_t b_hi = vreinterpretq_s16_u16(vmovl_u8(vget_high_u8(blur16)));
+				int16x8_t d_lo = vsubq_s16(o_lo, b_lo);
+				int16x8_t d_hi = vsubq_s16(o_hi, b_hi);
+				// vmull_n_s16: i16*i16 -> i32, no overflow; vshrn_n_s32 narrows back
+				int16x8_t s_lo = vcombine_s16(
+				    vshrn_n_s32(vmull_n_s16(vget_low_s16(d_lo), gain16), 8),
+				    vshrn_n_s32(vmull_n_s16(vget_high_s16(d_lo), gain16), 8));
+				int16x8_t s_hi = vcombine_s16(
+				    vshrn_n_s32(vmull_n_s16(vget_low_s16(d_hi), gain16), 8),
+				    vshrn_n_s32(vmull_n_s16(vget_high_s16(d_hi), gain16), 8));
+				int16x8_t r_lo = vaddq_s16(o_lo, s_lo);
+				int16x8_t r_hi = vaddq_s16(o_hi, s_hi);
+				vst1q_u8((uint8_t*)(out_buffer_or_null + i),
+				         vcombine_u8(vqmovun_s16(r_lo), vqmovun_s16(r_hi)));
+			}
+		}
+#else
+		n_simd = 0; // scalar path handles everything
+#endif
+		for (i32 i = n_simd; i < n_pixels; ++i) {
+			u32 orig = out_buffer_or_null[i];
+			u32 bl   = blur[i];
+			i32 r = (i32)(orig >>  0 & 0xFF) + ((gain_fp * ((i32)(orig>>0 &0xFF) - (i32)(bl>>0 &0xFF))) >> 8);
+			i32 g = (i32)(orig >>  8 & 0xFF) + ((gain_fp * ((i32)(orig>>8 &0xFF) - (i32)(bl>>8 &0xFF))) >> 8);
+			i32 b = (i32)(orig >> 16 & 0xFF) + ((gain_fp * ((i32)(orig>>16&0xFF) - (i32)(bl>>16&0xFF))) >> 8);
+			if (r < 0) r = 0; else if (r > 255) r = 255;
+			if (g < 0) g = 0; else if (g > 255) g = 255;
+			if (b < 0) b = 0; else if (b > 255) b = 255;
+			out_buffer_or_null[i] = (u32)r | ((u32)g << 8) | ((u32)b << 16) | (orig & 0xFF000000u);
+		}
+		// blur and horiz are freed by release_temp_memory below.
+	}
 
 //	if (scale == wsi->max_scale-1 && tile_x == 5 && tile_y == 0) {
 //		stbi_write_png("debug_dwt_output.png", tile_width, tile_height, 4, out_buffer_or_null, tile_width * 4);
 //	}
 
-	release_temp_memory(&temp_memory); // free Y, Co and Cg
+	release_temp_memory(&temp_memory); // free Y, Co, Cg, and any postprocessing temp buffers
 }
 
 
@@ -3697,6 +3902,10 @@ void isyntax_destroy(isyntax_t* isyntax) {
 					free(level->tiles);
 					level->tiles = NULL;
 				}
+			}
+			if (image->clahe_lut_grid) {
+				free(image->clahe_lut_grid);
+				image->clahe_lut_grid = NULL;
 			}
 		}
 	}

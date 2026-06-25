@@ -52,7 +52,7 @@ int main(int argc, char** argv) {
 
     if (argc <= 1) {
         printf("Usage: %s <isyntax_file> - show levels & tiles.\n"
-               "       %s <isyntax_file> <level> <tile_x> <tile_y> <output.png> - write a tile to output.png\n"
+               "       %s <isyntax_file> <level> <tile_x> <tile_y> <output.png> [postprocess] - write a tile to output.png\n"
                "       %s <isyntax_file> label <output.jpg> - write label image to output.jpg\n"
                "       %s <isyntax_file> macro <output.jpg> - write macro image to output.jpg\n",
                argv[0], argv[0], argv[0], argv[0]);
@@ -75,11 +75,14 @@ int main(int argc, char** argv) {
         int tile_x = atoi(argv[3]);
         int tile_y = atoi(argv[4]);
         const char* output_png = argv[5];
+        // Optional 7th argument: "postprocess" to enable CLAHE + sharpness
+        int use_postprocessing = (argc >= 7 && strcmp(argv[6], "postprocess") == 0);
 
         LOG_VAR("%d", level);
         LOG_VAR("%d", tile_x);
         LOG_VAR("%d", tile_y);
         LOG_VAR("%s", output_png);
+        LOG_VAR("%d", use_postprocessing);
 
         int32_t tile_width = libisyntax_get_tile_width(isyntax);
         int32_t tile_height = libisyntax_get_tile_height(isyntax);
@@ -89,6 +92,13 @@ int main(int argc, char** argv) {
         isyntax_cache_t *isyntax_cache = NULL;
         CHECK_LIBISYNTAX_OK(libisyntax_cache_create("example cache", 2000, &isyntax_cache));
         CHECK_LIBISYNTAX_OK(libisyntax_cache_inject(isyntax_cache, isyntax));
+
+        if (use_postprocessing) {
+            isyntax_image_t* wsi = (isyntax_image_t*)libisyntax_get_wsi_image(isyntax);
+            libisyntax_image_set_postprocessing(wsi, LIBISYNTAX_POSTPROCESSING_ALL);
+            CHECK_LIBISYNTAX_OK(libisyntax_image_prepare_postprocessing(isyntax, isyntax_cache, wsi));
+            printf("Post-processing enabled (CLAHE + sharpness).\n");
+        }
 
         // RGBA is what stbi expects.
         uint32_t *pixels_rgba = malloc(tile_width * tile_height * 4);
