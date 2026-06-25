@@ -95,6 +95,10 @@ endif()
 add_executable(isyntax_example src/examples/isyntax_example.c)
 target_link_libraries(isyntax_example isyntax)
 
+# Build example program: isyntax_region.c
+add_executable(isyntax-region src/examples/isyntax_region.c)
+target_link_libraries(isyntax-region isyntax)
+
 # Build iSyntax to TIFF converter program (depends on LibTIFF library)
 find_package(TIFF)
 if (NOT TIFF_FOUND)

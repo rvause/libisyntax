@@ -91,6 +91,12 @@ isyntax_example = executable(
   dependencies: [libisyntax_dep],
 )
 
+executable(
+  'isyntax_region',
+  'src/examples/isyntax_region.c',
+  dependencies: [libisyntax_dep],
+)
+
 if tiff.found()
   executable(
     'isyntax-to-tiff',
